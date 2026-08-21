@@ -65,13 +65,13 @@ The default values are configured to work with Docker Compose.
 
 ### `GET /health`
 
-Returns the service and database status.
+Returns service and database status.
 
 ### `POST /orders/`
 
 Creates a new order and decrements product stock **atomically**.
 
-#### Request Body
+**Request body:**
 
 ```json
 {
@@ -89,9 +89,7 @@ Creates a new order and decrements product stock **atomically**.
 }
 ```
 
-#### Response
-
-**Status:** `201 Created`
+**Response:** `201 Created`
 
 ```json
 {
@@ -117,10 +115,60 @@ Creates a new order and decrements product stock **atomically**.
 }
 ```
 
-#### Error Handling
+**Error handling:**
 
-* `404 Not Found` — The specified user or product does not exist.
-* `400 Bad Request` — There is insufficient stock for one or more requested products.
+* `404` — User or product not found
+* `400` — Insufficient stock
+
+### `GET /orders/{order_id}`
+
+Fetches a single order with all its items.
+
+### `GET /orders/user/{user_id}`
+
+Fetches all orders for a given user, sorted by `created_at` descending.
+
+### `PATCH /orders/{order_id}/status`
+
+Updates the order status with validation against a state machine.
+
+**Request body:**
+
+```json
+{
+  "status": "paid"
+}
+```
+
+**Allowed transitions:**
+
+* `PENDING` → `PAID` or `CANCELLED`
+* `PAID` → `SHIPPED` or `CANCELLED`
+* `SHIPPED` → No further transitions
+* `CANCELLED` → No further transitions
+
+An **invalid transition** returns `400 Bad Request`.
+
+### `GET /reports/revenue`
+
+Returns daily revenue aggregation for completed orders (`PAID` or `SHIPPED`) within a specified date range.
+
+**Query parameters:**
+
+* `start_date` — Date in `YYYY-MM-DD` format
+* `end_date` — Date in `YYYY-MM-DD` format
+
+**Response:**
+
+```json
+[
+  {
+    "date": "2026-08-21",
+    "total_revenue": 1999.98,
+    "order_count": 1
+  }
+]
+```
 
 ## Database Schema
 
