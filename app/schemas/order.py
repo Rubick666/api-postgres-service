@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, date
 from app.models.order import OrderStatus
 
 
@@ -28,3 +28,11 @@ class OrderResponse(BaseModel):
     total_amount: float
     created_at: datetime
     items: List[OrderItemResponse]
+
+class OrderStatusUpdate(BaseModel):
+    status: OrderStatus
+
+class RevenueByDay(BaseModel):
+    date: date
+    total_revenue: float
+    order_count: int

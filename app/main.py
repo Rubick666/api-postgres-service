@@ -11,7 +11,7 @@ from app.models.user import User  # noqa: F401
 from app.models.product import Product  # noqa: F401
 from app.models.order import Order, OrderItem  # noqa: F401
 
-from app.routers import health, orders
+from app.routers import health, orders, reports
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,6 +35,7 @@ app = FastAPI(
 # Include routers
 app.include_router(health.router)
 app.include_router(orders.router)
+app.include_router(reports.router)
 
 @app.get("/")
 async def root():

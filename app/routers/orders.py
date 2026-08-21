@@ -9,7 +9,26 @@ from app.db.session import get_db
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.product import Product
 from app.models.user import User
-from app.schemas.order import OrderCreate, OrderResponse, OrderItemResponse
+from app.schemas.order import OrderCreate, OrderResponse, OrderItemResponse, OrderStatusUpdate
+
+def _order_to_response(order: Order) -> OrderResponse:
+    """Convert an Order object to its response schema."""
+    return OrderResponse(
+        id=order.id,
+        user_id=order.user_id,
+        status=order.status,
+        total_amount=float(order.total_amount),
+        created_at=order.created_at,
+        items=[
+            OrderItemResponse(
+                product_id=item.product_id,
+                quantity=item.quantity,
+                unit_price=float(item.unit_price),
+                total_price=float(item.total_price),
+            )
+            for item in order.items
+        ],
+    )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -114,3 +133,70 @@ async def create_order(order_data: OrderCreate, db: AsyncSession = Depends(get_d
         created_at=order_with_items.created_at,
         items=items_response,
     )
+
+@router.get("/{order_id}", response_model=OrderResponse)
+async def get_order(order_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch a single order with its items."""
+    result = await db.execute(
+        select(Order)
+        .options(selectinload(Order.items))
+        .where(Order.id == order_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return _order_to_response(order)
+
+
+@router.get("/user/{user_id}", response_model=list[OrderResponse])
+async def get_user_orders(user_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch all orders for a given user."""
+    # Validate user exists
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    if not user_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="User not found")
+
+    result = await db.execute(
+        select(Order)
+        .options(selectinload(Order.items))
+        .where(Order.user_id == user_id)
+        .order_by(Order.created_at.desc())
+    )
+    orders = result.scalars().all()
+    return [_order_to_response(order) for order in orders]
+
+# Allowed transitions
+STATUS_TRANSITIONS = {
+    OrderStatus.PENDING: {OrderStatus.PAID, OrderStatus.CANCELLED},
+    OrderStatus.PAID: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
+    OrderStatus.SHIPPED: set(),
+    OrderStatus.CANCELLED: set(),
+}
+
+@router.patch("/{order_id}/status", response_model=OrderResponse)
+async def update_order_status(order_id: int, status_update: OrderStatusUpdate, db: AsyncSession = Depends(get_db)):
+    """Update the order status with validation against the state machine."""
+    result = await db.execute(
+        select(Order)
+        .options(selectinload(Order.items))
+        .where(Order.id == order_id)
+    )
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    new_status = status_update.status
+    allowed = STATUS_TRANSITIONS.get(order.status, set())
+    if new_status not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status transition: {order.status.value} -> {new_status.value}"
+        )
+
+    # Update status
+    order.status = new_status
+    order.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(order)
+
+    return _order_to_response(order)
