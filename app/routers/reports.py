@@ -3,8 +3,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import date
 
+from app.core.dependencies import require_admin
 from app.db.session import get_db
 from app.models.order import Order, OrderStatus
+from app.models.user import User
 from app.schemas.order import RevenueByDay
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -15,6 +17,7 @@ async def revenue_by_day(
     start_date: date = Query(...),
     end_date: date = Query(...),
     db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),  # admin required
 ):
     statuses = [OrderStatus.PAID, OrderStatus.SHIPPED]
 

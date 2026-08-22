@@ -1,16 +1,13 @@
-from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, date
+from pydantic import BaseModel
 from app.models.order import OrderStatus
-
 
 class OrderItemCreate(BaseModel):
     product_id: int
     quantity: int
 
-
 class OrderCreate(BaseModel):
-    user_id: int
     items: List[OrderItemCreate]
 
 

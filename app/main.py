@@ -1,29 +1,28 @@
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import create_async_engine
+
 from app.core.config import settings
 from app.db.base import Base
-from app.models.user import User
-from app.routers import health
-
-# Import all models so they register with Base.metadata
 from app.models.user import User  # noqa: F401
 from app.models.product import Product  # noqa: F401
 from app.models.order import Order, OrderItem  # noqa: F401
-
-from app.routers import health, orders, reports
+from app.routers import health, orders, reports, auth
+from app.tasks.expire_orders import expire_stale_orders  # import background task
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan context manager – runs on startup and shutdown.
-    """
     engine = create_async_engine(settings.database_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    print("Database tables created (if not already).")
+    if not settings.testing:
+        task = asyncio.create_task(expire_stale_orders())
+        print("Background task started.")
     yield
-    # Shutdown: nothing special here
+    if not settings.testing:
+        task.cancel()
+        print("Background task stopped.")
 
 app = FastAPI(
     title="Orders Service API",
@@ -32,10 +31,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Include routers
 app.include_router(health.router)
 app.include_router(orders.router)
 app.include_router(reports.router)
+app.include_router(auth.router)
 
 @app.get("/")
 async def root():

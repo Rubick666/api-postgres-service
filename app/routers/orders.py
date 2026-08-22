@@ -5,14 +5,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.dependencies import CurrentUser, AdminUser
 from app.db.session import get_db
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.product import Product
 from app.models.user import User
-from app.schemas.order import OrderCreate, OrderResponse, OrderItemResponse, OrderStatusUpdate
+from app.schemas.order import (
+    OrderCreate,
+    OrderResponse,
+    OrderItemResponse,
+    OrderStatusUpdate,
+)
+
+router = APIRouter(prefix="/orders", tags=["orders"])
+
 
 def _order_to_response(order: Order) -> OrderResponse:
-    """Convert an Order object to its response schema."""
     return OrderResponse(
         id=order.id,
         user_id=order.user_id,
@@ -30,24 +38,17 @@ def _order_to_response(order: Order) -> OrderResponse:
         ],
     )
 
-router = APIRouter(prefix="/orders", tags=["orders"])
 
-
+# ------------------------------------------------------------
+# Create order (any authenticated user)
+# ------------------------------------------------------------
 @router.post("/", response_model=OrderResponse, status_code=201)
-async def create_order(order_data: OrderCreate, db: AsyncSession = Depends(get_db)):
-    """
-    Create an order and decrement product stock atomically.
-    """
+async def create_order(
+    order_data: OrderCreate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
     async with db.begin():
-        # Validate user exists
-        user_result = await db.execute(select(User).where(User.id == order_data.user_id))
-        user = user_result.scalar_one_or_none()
-        if not user:
-            raise HTTPException(
-                status_code=404,
-                detail=f"User {order_data.user_id} not found",
-            )
-
         order_items = []
         total_amount = Decimal("0.00")
 
@@ -56,13 +57,11 @@ async def create_order(order_data: OrderCreate, db: AsyncSession = Depends(get_d
                 select(Product).where(Product.id == item.product_id)
             )
             product = result.scalar_one_or_none()
-
             if not product:
                 raise HTTPException(
                     status_code=404,
                     detail=f"Product {item.product_id} not found",
                 )
-
             if product.stock_quantity < item.quantity:
                 raise HTTPException(
                     status_code=400,
@@ -83,18 +82,16 @@ async def create_order(order_data: OrderCreate, db: AsyncSession = Depends(get_d
                     "total_price": line_total,
                 }
             )
-
             product.stock_quantity -= item.quantity
 
         order = Order(
-            user_id=order_data.user_id,
+            user_id=current_user.id,  # <-- use authenticated user ID
             status=OrderStatus.PENDING,
             total_amount=total_amount,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
         db.add(order)
-
         await db.flush()
 
         for item_data in order_items:
@@ -107,36 +104,25 @@ async def create_order(order_data: OrderCreate, db: AsyncSession = Depends(get_d
             )
             db.add(order_item)
 
-    # After commit, fetch the order with items eagerly loaded
+    # After commit, fetch order with items (eagerly loaded)
     result = await db.execute(
         select(Order)
         .options(selectinload(Order.items))
         .where(Order.id == order.id)
     )
     order_with_items = result.scalar_one()
+    return _order_to_response(order_with_items)
 
-    items_response = [
-        OrderItemResponse(
-            product_id=item.product_id,
-            quantity=item.quantity,
-            unit_price=float(item.unit_price),
-            total_price=float(item.total_price),
-        )
-        for item in order_with_items.items
-    ]
 
-    return OrderResponse(
-        id=order_with_items.id,
-        user_id=order_with_items.user_id,
-        status=order_with_items.status,
-        total_amount=float(order_with_items.total_amount),
-        created_at=order_with_items.created_at,
-        items=items_response,
-    )
-
+# ------------------------------------------------------------
+# Get single order (owner or admin)
+# ------------------------------------------------------------
 @router.get("/{order_id}", response_model=OrderResponse)
-async def get_order(order_id: int, db: AsyncSession = Depends(get_db)):
-    """Fetch a single order with its items."""
+async def get_order(
+    order_id: int,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(Order)
         .options(selectinload(Order.items))
@@ -145,13 +131,27 @@ async def get_order(order_id: int, db: AsyncSession = Depends(get_db)):
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # Allow access if owner or admin
+    if order.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized to view this order")
     return _order_to_response(order)
 
 
+# ------------------------------------------------------------
+# Get all orders for a user (admin or self)
+# ------------------------------------------------------------
 @router.get("/user/{user_id}", response_model=list[OrderResponse])
-async def get_user_orders(user_id: int, db: AsyncSession = Depends(get_db)):
-    """Fetch all orders for a given user."""
-    # Validate user exists
+async def get_user_orders(
+    user_id: int,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    # Only admin or the user themselves can see their orders
+    if user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized to view orders of this user")
+
+    # Check user exists
     user_result = await db.execute(select(User).where(User.id == user_id))
     if not user_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="User not found")
@@ -165,17 +165,25 @@ async def get_user_orders(user_id: int, db: AsyncSession = Depends(get_db)):
     orders = result.scalars().all()
     return [_order_to_response(order) for order in orders]
 
-# Allowed transitions
-STATUS_TRANSITIONS = {
-    OrderStatus.PENDING: {OrderStatus.PAID, OrderStatus.CANCELLED},
-    OrderStatus.PAID: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
-    OrderStatus.SHIPPED: set(),
-    OrderStatus.CANCELLED: set(),
-}
 
+# ------------------------------------------------------------
+# Update order status (admin only)
+# ------------------------------------------------------------
 @router.patch("/{order_id}/status", response_model=OrderResponse)
-async def update_order_status(order_id: int, status_update: OrderStatusUpdate, db: AsyncSession = Depends(get_db)):
-    """Update the order status with validation against the state machine."""
+async def update_order_status(
+    order_id: int,
+    status_update: OrderStatusUpdate,
+    admin_user: AdminUser,
+    db: AsyncSession = Depends(get_db),
+):
+    # Allowed transitions
+    STATUS_TRANSITIONS = {
+        OrderStatus.PENDING: {OrderStatus.PAID, OrderStatus.CANCELLED},
+        OrderStatus.PAID: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
+        OrderStatus.SHIPPED: set(),
+        OrderStatus.CANCELLED: set(),
+    }
+
     result = await db.execute(
         select(Order)
         .options(selectinload(Order.items))
@@ -190,13 +198,18 @@ async def update_order_status(order_id: int, status_update: OrderStatusUpdate, d
     if new_status not in allowed:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid status transition: {order.status.value} -> {new_status.value}"
+            detail=f"Invalid status transition: {order.status.value} -> {new_status.value}",
         )
 
-    # Update status
     order.status = new_status
     order.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(order)
-
-    return _order_to_response(order)
+    # Reload items
+    result = await db.execute(
+        select(Order)
+        .options(selectinload(Order.items))
+        .where(Order.id == order.id)
+    )
+    order_with_items = result.scalar_one()
+    return _order_to_response(order_with_items)
